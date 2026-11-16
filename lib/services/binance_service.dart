@@ -98,7 +98,7 @@ class BinanceService extends ChangeNotifier {
 
   void _connectWebSocket() {
     try {
-      final uri = Uri.parse('wss://stream.binance.com:9443/ws/!ticker@arr');
+      final uri = Uri.parse('wss://data-stream.binance.vision/ws/!ticker@arr');
       _channel = WebSocketChannel.connect(uri);
       isConnected = true;
       DebugLogger.instance.log('WS', 'Connecté au flux temps réel Binance.');
@@ -259,7 +259,7 @@ class BinanceService extends ChangeNotifier {
     _historyFetching.add(token.symbol);
     try {
       final url = Uri.parse(
-          'https://api.binance.com/api/v3/klines?symbol=${token.symbol}&interval=1d&limit=181');
+          'https://data-api.binance.vision/api/v3/klines?symbol=${token.symbol}&interval=1d&limit=181');
       final res = await http.get(url).timeout(const Duration(seconds: 8));
       if (res.statusCode == 200) {
         final List<dynamic> klines = jsonDecode(res.body);
