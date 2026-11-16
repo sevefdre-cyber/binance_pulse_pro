@@ -67,13 +67,11 @@ class BinanceService extends ChangeNotifier {
     if (isScanning) return;
     isScanning = true;
     isConnected = true;
-    DebugLogger.instance.log('POLL', 'Démarrage du scanner HTTP Polling (24hr Tickers)...');
+    DebugLogger.instance.log('POLL', 'Démarrage du scanner HTTP Polling...');
     notifyListeners();
 
-    // Premier appel immédiat au lancement
     _fetchTickers();
 
-    // Actualisation automatique toutes les 3 secondes
     _pollingTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (isScanning) {
         _fetchTickers();
@@ -90,23 +88,27 @@ class BinanceService extends ChangeNotifier {
   }
 
   Future<void> _fetchTickers() async {
+    DebugLogger.instance.log('POLL-DEBUG', 'Envoi de la requête HTTP vers api.binance.com...');
     try {
       final url = Uri.parse('https://api.binance.com/api/v3/ticker/24hr');
-      final res = await http.get(url).timeout(const Duration(seconds: 6));
+      final res = await http.get(url).timeout(const Duration(seconds: 8));
       
+      DebugLogger.instance.log('POLL-DEBUG', 'Réponse reçue ! Code HTTP: ${res.statusCode} (Taille: ${res.body.length} octets)');
+
       if (res.statusCode == 200) {
         final List<dynamic> tickers = jsonDecode(res.body);
         _handleTickerArray(tickers);
       } else {
-        DebugLogger.instance.log('POLL-WARN', 'HTTP ${res.statusCode} reçu de Binance.');
+        DebugLogger.instance.log('POLL-WARN', 'HTTP ${res.statusCode} reçu de Binance: ${res.body}');
       }
     } catch (e) {
-      DebugLogger.instance.log('POLL-ERROR', 'Erreur réseau polling: $e');
+      DebugLogger.instance.log('POLL-ERROR', 'Erreur réseau polling attrapée: $e');
     }
   }
 
   void _handleTickerArray(List<dynamic> tickers) {
     final now = DateTime.now();
+    int count = 0;
 
     for (final item in tickers) {
       final String symbol = item['s'] ?? '';
@@ -125,6 +127,8 @@ class BinanceService extends ChangeNotifier {
       final double low = double.tryParse(item['l'] ?? '0') ?? 0;
 
       if (lastPrice <= 0) continue;
+
+      count++;
 
       if (symbol == 'BTCUSDT') {
         btcPrice = lastPrice;
@@ -165,6 +169,8 @@ class BinanceService extends ChangeNotifier {
         );
       }
     }
+
+    DebugLogger.instance.log('POLL-DEBUG', '$count paires USDT valides traitées avec succès.');
 
     final list = _tokensMap.values.toList()
       ..sort((a, b) => b.priceChange24hPct.compareTo(a.priceChange24hPct));
@@ -240,7 +246,7 @@ class BinanceService extends ChangeNotifier {
           final currentClose = double.parse(klines.last[4].toString());
           final currentVol = double.parse(klines.last[7].toString());
 
-          PeriodMetric calcPeriod(int daysAgo) {
+          PeriodMetrics calcPeriod(int daysAgo) {
             final idx = (klines.length - 1 - daysAgo).clamp(0, klines.length - 1);
             final pastClose = double.parse(klines[idx][4].toString());
             final pastVol = double.parse(klines[idx][7].toString());
