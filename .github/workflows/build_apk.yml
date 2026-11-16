@@ -30,6 +30,7 @@ jobs:
           sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"\/>\n    <uses-permission android:name="android.permission.VIBRATE"\/>\n    <application/' $MANIFEST
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 23/' android/app/build.gradle || true
           sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 23/' android/app/build.gradle || true
+          sed -i 's/id "org.jetbrains.kotlin.android" version "[^"]*"/id "org.jetbrains.kotlin.android" version "1.9.24"/' android/settings.gradle || true
       - name: Get Flutter dependencies
         run: flutter pub get
       - name: Build Release APK
