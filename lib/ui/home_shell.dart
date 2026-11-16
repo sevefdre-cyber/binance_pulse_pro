@@ -28,7 +28,7 @@ class HomeShell extends StatelessWidget {
             label: 'Scan & Risque',
           ),
           BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.ladybug_fill),
+            icon: Icon(CupertinoIcons.ant_fill),
             label: 'Debug Log',
           ),
         ],
