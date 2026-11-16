@@ -246,7 +246,7 @@ class BinanceService extends ChangeNotifier {
           final currentClose = double.parse(klines.last[4].toString());
           final currentVol = double.parse(klines.last[7].toString());
 
-          PeriodMetrics calcPeriod(int daysAgo) {
+          PeriodMetric calcPeriod(int daysAgo) {
             final idx = (klines.length - 1 - daysAgo).clamp(0, klines.length - 1);
             final pastClose = double.parse(klines[idx][4].toString());
             final pastVol = double.parse(klines[idx][7].toString());
