@@ -88,21 +88,18 @@ class BinanceService extends ChangeNotifier {
   }
 
   Future<void> _fetchTickers() async {
-    DebugLogger.instance.log('POLL-DEBUG', 'Envoi de la requête HTTP vers api.binance.com...');
     try {
       final url = Uri.parse('https://api.binance.com/api/v3/ticker/24hr');
       final res = await http.get(url).timeout(const Duration(seconds: 8));
-      
-      DebugLogger.instance.log('POLL-DEBUG', 'Réponse reçue ! Code HTTP: ${res.statusCode} (Taille: ${res.body.length} octets)');
 
       if (res.statusCode == 200) {
         final List<dynamic> tickers = jsonDecode(res.body);
         _handleTickerArray(tickers);
       } else {
-        DebugLogger.instance.log('POLL-WARN', 'HTTP ${res.statusCode} reçu de Binance: ${res.body}');
+        DebugLogger.instance.log('POLL-WARN', 'HTTP ${res.statusCode} reçu de Binance');
       }
     } catch (e) {
-      DebugLogger.instance.log('POLL-ERROR', 'Erreur réseau polling attrapée: $e');
+      DebugLogger.instance.log('POLL-ERROR', 'Erreur réseau polling: $e');
     }
   }
 
@@ -111,7 +108,8 @@ class BinanceService extends ChangeNotifier {
     int count = 0;
 
     for (final item in tickers) {
-      final String symbol = item['s'] ?? '';
+      // Clés REST /api/v3/ticker/24hr officielles de Binance
+      final String symbol = item['symbol'] ?? '';
       if (!symbol.endsWith('USDT')) continue;
       if (symbol.contains('UPUSDT') ||
           symbol.contains('DOWNUSDT') ||
@@ -120,11 +118,11 @@ class BinanceService extends ChangeNotifier {
         continue;
       }
 
-      final double lastPrice = double.tryParse(item['c'] ?? '0') ?? 0;
-      final double pricePct24h = double.tryParse(item['P'] ?? '0') ?? 0;
-      final double quoteVol = double.tryParse(item['q'] ?? '0') ?? 0;
-      final double high = double.tryParse(item['h'] ?? '0') ?? 0;
-      final double low = double.tryParse(item['l'] ?? '0') ?? 0;
+      final double lastPrice = double.tryParse(item['lastPrice'] ?? '0') ?? 0;
+      final double pricePct24h = double.tryParse(item['priceChangePercent'] ?? '0') ?? 0;
+      final double quoteVol = double.tryParse(item['quoteVolume'] ?? '0') ?? 0;
+      final double high = double.tryParse(item['highPrice'] ?? '0') ?? 0;
+      final double low = double.tryParse(item['lowPrice'] ?? '0') ?? 0;
 
       if (lastPrice <= 0) continue;
 
