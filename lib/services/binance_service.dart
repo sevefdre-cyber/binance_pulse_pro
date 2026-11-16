@@ -98,10 +98,11 @@ class BinanceService extends ChangeNotifier {
 
   void _connectWebSocket() {
     try {
-      final uri = Uri.parse('wss://data-stream.binance.vision/ws/!ticker@arr');
+      // Utilisation du port standard 443 pour éviter les blocages de pare-feux/réseaux mobiles
+      final uri = Uri.parse('wss://stream.binance.com/ws/!ticker@arr');
       _channel = WebSocketChannel.connect(uri);
       isConnected = true;
-      DebugLogger.instance.log('WS', 'Connecté au flux temps réel Binance.');
+      DebugLogger.instance.log('WS', 'Connecté au flux temps réel Binance (Port 443).');
 
       _wsSub = _channel!.stream.listen(
         (rawMessage) => _handleTickerArray(rawMessage),
@@ -132,134 +133,138 @@ class BinanceService extends ChangeNotifier {
   }
 
   void _handleTickerArray(dynamic rawMessage) {
-    final List<dynamic> tickers = jsonDecode(rawMessage as String);
-    final now = DateTime.now();
+    try {
+      final List<dynamic> tickers = jsonDecode(rawMessage as String);
+      final now = DateTime.now();
 
-    for (final item in tickers) {
-      final String symbol = item['s'] ?? '';
-      if (!symbol.endsWith('USDT')) continue;
-      if (symbol.contains('UPUSDT') ||
-          symbol.contains('DOWNUSDT') ||
-          symbol.contains('BULLUSDT') ||
-          symbol.contains('BEARUSDT')) {
-        continue;
-      }
+      for (final item in tickers) {
+        final String symbol = item['s'] ?? '';
+        if (!symbol.endsWith('USDT')) continue;
+        if (symbol.contains('UPUSDT') ||
+            symbol.contains('DOWNUSDT') ||
+            symbol.contains('BULLUSDT') ||
+            symbol.contains('BEARUSDT')) {
+          continue;
+        }
 
-      final double lastPrice = double.tryParse(item['c'] ?? '0') ?? 0;
-      final double pricePct24h = double.tryParse(item['P'] ?? '0') ?? 0;
-      final double quoteVol = double.tryParse(item['q'] ?? '0') ?? 0;
-      final double high = double.tryParse(item['h'] ?? '0') ?? 0;
-      final double low = double.tryParse(item['l'] ?? '0') ?? 0;
+        final double lastPrice = double.tryParse(item['c'] ?? '0') ?? 0;
+        final double pricePct24h = double.tryParse(item['P'] ?? '0') ?? 0;
+        final double quoteVol = double.tryParse(item['q'] ?? '0') ?? 0;
+        final double high = double.tryParse(item['h'] ?? '0') ?? 0;
+        final double low = double.tryParse(item['l'] ?? '0') ?? 0;
 
-      if (lastPrice <= 0) continue;
+        if (lastPrice <= 0) continue;
 
-      if (symbol == 'BTCUSDT') {
-        btcPrice = lastPrice;
-        btcChange24hPct = pricePct24h;
-        _btcRecentPrices.add(lastPrice);
-        if (_btcRecentPrices.length > 60) {
-          _btcRecentPrices.removeAt(0);
+        if (symbol == 'BTCUSDT') {
+          btcPrice = lastPrice;
+          btcChange24hPct = pricePct24h;
+          _btcRecentPrices.add(lastPrice);
+          if (_btcRecentPrices.length > 60) {
+            _btcRecentPrices.removeAt(0);
+          }
+        }
+
+        simulator.onPriceTick(symbol, lastPrice);
+
+        if (quoteVol < activePreset.minVolume24hUsdt &&
+            !(_tokensMap[symbol]?.isSpecial ?? false)) {
+          continue;
+        }
+
+        final existing = _tokensMap[symbol];
+        if (existing == null) {
+          _tokensMap[symbol] = TokenData(
+            symbol: symbol,
+            baseAsset: symbol.replaceAll('USDT', ''),
+            currentPrice: lastPrice,
+            priceChange24hPct: pricePct24h,
+            quoteVolume24h: quoteVol,
+            high24h: high,
+            low24h: low,
+          );
+        } else {
+          existing.currentPrice = lastPrice;
+          existing.priceChange24hPct = pricePct24h;
+          existing.quoteVolume24h = quoteVol;
+          existing.high24h = high;
+          existing.low24h = low;
+          existing.historicalMetrics['1J'] = PeriodMetric(
+            priceChangePct: pricePct24h,
+            volumeChangePct: existing.historicalMetrics['1J']?.volumeChangePct ?? 0,
+          );
         }
       }
 
-      simulator.onPriceTick(symbol, lastPrice);
+      final list = _tokensMap.values.toList()
+        ..sort((a, b) => b.priceChange24hPct.compareTo(a.priceChange24hPct));
 
-      if (quoteVol < activePreset.minVolume24hUsdt &&
-          !(_tokensMap[symbol]?.isSpecial ?? false)) {
-        continue;
-      }
+      for (int i = 0; i < list.length; i++) {
+        final token = list[i];
+        final newRank = i + 1;
 
-      final existing = _tokensMap[symbol];
-      if (existing == null) {
-        _tokensMap[symbol] = TokenData(
-          symbol: symbol,
-          baseAsset: symbol.replaceAll('USDT', ''),
-          currentPrice: lastPrice,
-          priceChange24hPct: pricePct24h,
-          quoteVolume24h: quoteVol,
-          high24h: high,
-          low24h: low,
+        if (token.currentRank > 0 && newRank < token.currentRank) {
+          final int jumped = token.currentRank - newRank;
+          for (int k = 0; k < jumped; k++) {
+            token.upwardMoveTimestamps.add(now);
+          }
+        }
+
+        token.previousRank = token.currentRank == 0 ? newRank : token.currentRank;
+        token.currentRank = newRank;
+
+        token.upwardMoveTimestamps.removeWhere(
+          (ts) => now.difference(ts).inSeconds > activePreset.windowSeconds,
         );
-      } else {
-        existing.currentPrice = lastPrice;
-        existing.priceChange24hPct = pricePct24h;
-        existing.quoteVolume24h = quoteVol;
-        existing.high24h = high;
-        existing.low24h = low;
-        existing.historicalMetrics['1J'] = PeriodMetric(
-          priceChangePct: pricePct24h,
-          volumeChangePct: existing.historicalMetrics['1J']?.volumeChangePct ?? 0,
-        );
-      }
-    }
+        token.rankDeltaAccumulator = token.upwardMoveTimestamps.length;
 
-    final list = _tokensMap.values.toList()
-      ..sort((a, b) => b.priceChange24hPct.compareTo(a.priceChange24hPct));
+        final bool isEligible = !activePreset.specialTokensOnly || token.isSpecial;
+        final bool cooldownOk = token.lastAlertTime == null ||
+            now.difference(token.lastAlertTime!).inSeconds > 120;
 
-    for (int i = 0; i < list.length; i++) {
-      final token = list[i];
-      final newRank = i + 1;
+        if (isEligible &&
+            cooldownOk &&
+            token.rankDeltaAccumulator >= activePreset.requiredRankJumps &&
+            token.priceChange24hPct >= activePreset.minPriceChange1d) {
+          token.lastAlertTime = now;
+          final btcBiasText = isBtcBullish ? 'HAUSSIER (LONG)' : 'BAISSIER (SHORT)';
+          final reason =
+              '${token.symbol} a gagné +${token.rankDeltaAccumulator} rangs en ${activePreset.windowSeconds}s (Rang #${token.currentRank})';
 
-      if (token.currentRank > 0 && newRank < token.currentRank) {
-        final int jumped = token.currentRank - newRank;
-        for (int k = 0; k < jumped; k++) {
-          token.upwardMoveTimestamps.add(now);
+          DebugLogger.instance.log('ALERT-EXPLOSION', '🚀 $reason | BTC: $btcBiasText');
+
+          NotificationService.instance.showExplosionAlert(
+            symbol: token.symbol,
+            jumps: token.rankDeltaAccumulator,
+            windowSec: activePreset.windowSeconds,
+            price: token.currentPrice,
+            change24h: token.priceChange24hPct,
+            btcBias: btcBiasText,
+          );
+
+          simulator.onTokenSignal(
+            token: token,
+            isBtcBullish: isBtcBullish,
+            reason: reason,
+          );
+        }
+
+        if (i < 35 && !token.historyLoaded && !_historyFetching.contains(token.symbol)) {
+          _fetchHistoricalKlines(token);
         }
       }
 
-      token.previousRank = token.currentRank == 0 ? newRank : token.currentRank;
-      token.currentRank = newRank;
-
-      token.upwardMoveTimestamps.removeWhere(
-        (ts) => now.difference(ts).inSeconds > activePreset.windowSeconds,
-      );
-      token.rankDeltaAccumulator = token.upwardMoveTimestamps.length;
-
-      final bool isEligible = !activePreset.specialTokensOnly || token.isSpecial;
-      final bool cooldownOk = token.lastAlertTime == null ||
-          now.difference(token.lastAlertTime!).inSeconds > 120;
-
-      if (isEligible &&
-          cooldownOk &&
-          token.rankDeltaAccumulator >= activePreset.requiredRankJumps &&
-          token.priceChange24hPct >= activePreset.minPriceChange1d) {
-        token.lastAlertTime = now;
-        final btcBiasText = isBtcBullish ? 'HAUSSIER (LONG)' : 'BAISSIER (SHORT)';
-        final reason =
-            '${token.symbol} a gagné +${token.rankDeltaAccumulator} rangs en ${activePreset.windowSeconds}s (Rang #${token.currentRank})';
-
-        DebugLogger.instance.log('ALERT-EXPLOSION', '🚀 $reason | BTC: $btcBiasText');
-
-        NotificationService.instance.showExplosionAlert(
-          symbol: token.symbol,
-          jumps: token.rankDeltaAccumulator,
-          windowSec: activePreset.windowSeconds,
-          price: token.currentPrice,
-          change24h: token.priceChange24hPct,
-          btcBias: btcBiasText,
-        );
-
-        simulator.onTokenSignal(
-          token: token,
-          isBtcBullish: isBtcBullish,
-          reason: reason,
-        );
-      }
-
-      if (i < 35 && !token.historyLoaded && !_historyFetching.contains(token.symbol)) {
-        _fetchHistoricalKlines(token);
-      }
+      _rankedList = list;
+      _dirty = true;
+    } catch (e) {
+      DebugLogger.instance.log('WS-ERROR', 'Erreur traitement message: $e');
     }
-
-    _rankedList = list;
-    _dirty = true;
   }
 
   Future<void> _fetchHistoricalKlines(TokenData token) async {
     _historyFetching.add(token.symbol);
     try {
       final url = Uri.parse(
-          'https://data-api.binance.vision/api/v3/klines?symbol=${token.symbol}&interval=1d&limit=181');
+          'https://api.binance.com/api/v3/klines?symbol=${token.symbol}&interval=1d&limit=181');
       final res = await http.get(url).timeout(const Duration(seconds: 8));
       if (res.statusCode == 200) {
         final List<dynamic> klines = jsonDecode(res.body);
