@@ -72,7 +72,7 @@ class BinanceService extends ChangeNotifier {
   Future<void> startScanner() async {
     if (isScanning) return;
     isScanning = true;
-    DebugLogger.instance.log('WS', 'Démarrage du flux WebSocket Binance (!ticker@arr)...');
+    DebugLogger.instance.log('WS', 'Démarrage du flux WebSocket Binance...');
     notifyListeners();
 
     _connectWebSocket();
@@ -98,8 +98,8 @@ class BinanceService extends ChangeNotifier {
 
   void _connectWebSocket() {
     try {
-      // Utilisation du port standard 443 pour éviter les blocages de pare-feux/réseaux mobiles
-      final uri = Uri.parse('wss://stream.binance.com/ws/!ticker@arr');
+      // Utilisation du port standard 443 via l'endpoint stream combiné
+      final uri = Uri.parse('wss://stream.binance.com/stream?streams=!ticker@arr');
       _channel = WebSocketChannel.connect(uri);
       isConnected = true;
       DebugLogger.instance.log('WS', 'Connecté au flux temps réel Binance (Port 443).');
@@ -134,7 +134,20 @@ class BinanceService extends ChangeNotifier {
 
   void _handleTickerArray(dynamic rawMessage) {
     try {
-      final List<dynamic> tickers = jsonDecode(rawMessage as String);
+      final decoded = jsonDecode(rawMessage as String);
+      List<dynamic> tickers = [];
+
+      // Gestion compatible flux combiné {"stream": "...", "data": [...]} ou tableau direct [...]
+      if (decoded is Map) {
+        if (decoded.containsKey('data') && decoded['data'] is List) {
+          tickers = decoded['data'];
+        }
+      } else if (decoded is List) {
+        tickers = decoded;
+      }
+
+      if (tickers.isEmpty) return;
+
       final now = DateTime.now();
 
       for (final item in tickers) {
