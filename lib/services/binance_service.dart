@@ -80,7 +80,6 @@ class BinanceService extends ChangeNotifier {
       }
     });
 
-    // Rafraîchissement périodique de l'UI pour intégrer les historiques de manière fluide
     _uiThrottleTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
       if (_dirty) {
         _dirty = false;
@@ -168,7 +167,7 @@ class BinanceService extends ChangeNotifier {
       } else {
         existing.currentPrice = lastPrice;
         existing.priceChange24hPct = pricePct24h;
-        existing.quoteVolume24h: quoteVol;
+        existing.quoteVolume24h = quoteVol; // <-- Correction ici (= au lieu de :)
         existing.high24h = high;
         existing.low24h = low;
         if (existing.historicalMetrics.containsKey('1J')) {
@@ -253,7 +252,6 @@ class BinanceService extends ChangeNotifier {
       if (res.statusCode == 200) {
         final List<dynamic> klines = jsonDecode(res.body);
         if (klines.length >= 2) {
-          // Utilisation du dernier prix de clôture de la bougie journalière de référence
           final currentClose = double.parse(klines.last[4].toString());
           final currentVol = double.parse(klines.last[7].toString());
 
@@ -262,7 +260,6 @@ class BinanceService extends ChangeNotifier {
             final pastClose = double.parse(klines[idx][4].toString());
             final pastVol = double.parse(klines[idx][7].toString());
             
-            // Calcul propre de la variation en pourcentage entre la période passée et maintenant
             final pPct = pastClose > 0
                 ? ((currentClose - pastClose) / pastClose) * 100
                 : 0.0;
