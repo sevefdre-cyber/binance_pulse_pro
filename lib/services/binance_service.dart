@@ -167,7 +167,7 @@ class BinanceService extends ChangeNotifier {
       } else {
         existing.currentPrice = lastPrice;
         existing.priceChange24hPct = pricePct24h;
-        existing.quoteVolume24h = quoteVol; // <-- Correction ici (= au lieu de :)
+        existing.quoteVolume24h = quoteVol;
         existing.high24h = high;
         existing.low24h = low;
         if (existing.historicalMetrics.containsKey('1J')) {
@@ -247,7 +247,7 @@ class BinanceService extends ChangeNotifier {
     _historyFetching.add(token.symbol);
     try {
       final url = Uri.parse(
-          'https://api.binance.com/api/v3/klines?symbol=${token.symbol}&interval=1d&limit=181');
+          'https://api.binance.com/api/v3/klines?symbol=${token.symbol}&interval=1d&limit=200');
       final res = await http.get(url).timeout(const Duration(seconds: 8));
       if (res.statusCode == 200) {
         final List<dynamic> klines = jsonDecode(res.body);
@@ -255,16 +255,17 @@ class BinanceService extends ChangeNotifier {
           final currentClose = double.parse(klines.last[4].toString());
           final currentVol = double.parse(klines.last[7].toString());
 
-          PeriodMetric calcPeriod(int daysAgo) {
-            final idx = (klines.length - 1 - daysAgo).clamp(0, klines.length - 1);
-            final pastClose = double.parse(klines[idx][4].toString());
-            final pastVol = double.parse(klines[idx][7].toString());
-            
+          PeriodMetric calcPeriod(int targetDays) {
+            final int index = (klines.length - 1 - targetDays).clamp(0, klines.length - 1);
+            final pastClose = double.parse(klines[index][4].toString());
+            final pastVol = double.parse(klines[index][7].toString());
+
             final pPct = pastClose > 0
                 ? ((currentClose - pastClose) / pastClose) * 100
                 : 0.0;
             final vPct =
                 pastVol > 0 ? ((currentVol - pastVol) / pastVol) * 100 : 0.0;
+
             return PeriodMetric(priceChangePct: pPct, volumeChangePct: vPct);
           }
 
