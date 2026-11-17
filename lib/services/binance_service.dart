@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../models/scan_preset.dart';
 import '../models/token_data.dart';
@@ -14,7 +15,11 @@ class BinanceService extends ChangeNotifier {
 
   BinanceService({required this.simulator});
 
-  Timer? _pollingTimer;
+  WebSocketChannel? _channel;
+  StreamSubscription? _wsSub;
+  Timer? _reconnectTimer;
+  Timer? _uiThrottleTimer;
+
   bool isScanning = false;
   bool isConnected = false;
 
@@ -41,6 +46,7 @@ class BinanceService extends ChangeNotifier {
   ScanPreset get activePreset => presets[selectedPresetIndex];
 
   final Set<String> _historyFetching = {};
+  bool _dirty = false;
 
   void selectPreset(int index) {
     selectedPresetIndex = index;
@@ -66,15 +72,16 @@ class BinanceService extends ChangeNotifier {
   Future<void> startScanner() async {
     if (isScanning) return;
     isScanning = true;
-    isConnected = true;
-    DebugLogger.instance.log('POLL', 'Démarrage du scanner HTTP Polling...');
+    DebugLogger.instance.log('WS', 'Démarrage du flux WebSocket Binance (!ticker@arr)...');
     notifyListeners();
 
-    _fetchTickers();
+    _connectWebSocket();
 
-    _pollingTimer = Timer.periodic(const Duration(seconds: 3), (_) {
-      if (isScanning) {
-        _fetchTickers();
+    // Rafraîchissement fluide de l'UI pour éviter les surcharges de notifications
+    _uiThrottleTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (_dirty) {
+        _dirty = false;
+        notifyListeners();
       }
     });
   }
@@ -82,154 +89,183 @@ class BinanceService extends ChangeNotifier {
   void stopScanner() {
     isScanning = false;
     isConnected = false;
-    _pollingTimer?.cancel();
-    DebugLogger.instance.log('POLL', 'Scanner arrêté manuellement.');
+    _reconnectTimer?.cancel();
+    _uiThrottleTimer?.cancel();
+    _wsSub?.cancel();
+    _channel?.sink.close();
+    DebugLogger.instance.log('WS', 'Scanner WebSocket arrêté manuellement.');
     notifyListeners();
   }
 
-  Future<void> _fetchTickers() async {
+  void _connectWebSocket() {
     try {
-      final url = Uri.parse('https://api.binance.com/api/v3/ticker/24hr');
-      final res = await http.get(url).timeout(const Duration(seconds: 8));
+      // Utilisation du port 443 standard (universellement autorisé)
+      final uri = Uri.parse('wss://stream.binance.com/ws/!ticker@arr');
+      DebugLogger.instance.log('WS', 'Connexion à l\'URI WebSocket: $uri');
+      
+      _channel = WebSocketChannel.connect(uri);
+      isConnected = true;
+      DebugLogger.instance.log('WS', 'Connecté au flux WebSocket Binance.');
 
-      if (res.statusCode == 200) {
-        final List<dynamic> tickers = jsonDecode(res.body);
-        _handleTickerArray(tickers);
-      } else {
-        DebugLogger.instance.log('POLL-WARN', 'HTTP ${res.statusCode} reçu de Binance');
-      }
+      _wsSub = _channel!.stream.listen(
+        (rawMessage) => _handleTickerArray(rawMessage),
+        onError: (err) {
+          isConnected = false;
+          DebugLogger.instance.log('WS-ERROR', 'Erreur WebSocket: $err');
+          _scheduleReconnect();
+        },
+        onDone: () {
+          isConnected = false;
+          DebugLogger.instance.log('WS', 'Flux WebSocket fermé par le serveur.');
+          if (isScanning) _scheduleReconnect();
+        },
+      );
     } catch (e) {
-      DebugLogger.instance.log('POLL-ERROR', 'Erreur réseau polling: $e');
+      isConnected = false;
+      DebugLogger.instance.log('WS-ERROR', 'Exception connexion WebSocket: $e');
+      _scheduleReconnect();
     }
   }
 
-  void _handleTickerArray(List<dynamic> tickers) {
-    final now = DateTime.now();
-    int count = 0;
+  void _scheduleReconnect() {
+    if (!isScanning) return;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(const Duration(seconds: 3), () {
+      DebugLogger.instance.log('WS', 'Tentative de reconnexion WebSocket...');
+      _connectWebSocket();
+    });
+  }
 
-    for (final item in tickers) {
-      // Clés REST /api/v3/ticker/24hr officielles de Binance
-      final String symbol = item['symbol'] ?? '';
-      if (!symbol.endsWith('USDT')) continue;
-      if (symbol.contains('UPUSDT') ||
-          symbol.contains('DOWNUSDT') ||
-          symbol.contains('BULLUSDT') ||
-          symbol.contains('BEARUSDT')) {
-        continue;
-      }
+  void _handleTickerArray(dynamic rawMessage) {
+    try {
+      final List<dynamic> tickers = jsonDecode(rawMessage as String);
+      final now = DateTime.now();
+      int count = 0;
 
-      final double lastPrice = double.tryParse(item['lastPrice'] ?? '0') ?? 0;
-      final double pricePct24h = double.tryParse(item['priceChangePercent'] ?? '0') ?? 0;
-      final double quoteVol = double.tryParse(item['quoteVolume'] ?? '0') ?? 0;
-      final double high = double.tryParse(item['highPrice'] ?? '0') ?? 0;
-      final double low = double.tryParse(item['lowPrice'] ?? '0') ?? 0;
+      for (final item in tickers) {
+        // Clés abrégées officielles du flux WebSocket Binance !ticker@arr
+        final String symbol = item['s'] ?? '';
+        if (!symbol.endsWith('USDT')) continue;
+        if (symbol.contains('UPUSDT') ||
+            symbol.contains('DOWNUSDT') ||
+            symbol.contains('BULLUSDT') ||
+            symbol.contains('BEARUSDT')) {
+          continue;
+        }
 
-      if (lastPrice <= 0) continue;
+        final double lastPrice = double.tryParse(item['c'] ?? '0') ?? 0;
+        final double pricePct24h = double.tryParse(item['P'] ?? '0') ?? 0;
+        final double quoteVol = double.tryParse(item['q'] ?? '0') ?? 0;
+        final double high = double.tryParse(item['h'] ?? '0') ?? 0;
+        final double low = double.tryParse(item['l'] ?? '0') ?? 0;
 
-      count++;
+        if (lastPrice <= 0) continue;
 
-      if (symbol == 'BTCUSDT') {
-        btcPrice = lastPrice;
-        btcChange24hPct = pricePct24h;
-        _btcRecentPrices.add(lastPrice);
-        if (_btcRecentPrices.length > 60) {
-          _btcRecentPrices.removeAt(0);
+        count++;
+
+        if (symbol == 'BTCUSDT') {
+          btcPrice = lastPrice;
+          btcChange24hPct = pricePct24h;
+          _btcRecentPrices.add(lastPrice);
+          if (_btcRecentPrices.length > 60) {
+            _btcRecentPrices.removeAt(0);
+          }
+        }
+
+        simulator.onPriceTick(symbol, lastPrice);
+
+        if (quoteVol < activePreset.minVolume24hUsdt &&
+            !(_tokensMap[symbol]?.isSpecial ?? false)) {
+          continue;
+        }
+
+        final existing = _tokensMap[symbol];
+        if (existing == null) {
+          _tokensMap[symbol] = TokenData(
+            symbol: symbol,
+            baseAsset: symbol.replaceAll('USDT', ''),
+            currentPrice: lastPrice,
+            priceChange24hPct: pricePct24h,
+            quoteVolume24h: quoteVol,
+            high24h: high,
+            low24h: low,
+          );
+        } else {
+          existing.currentPrice = lastPrice;
+          existing.priceChange24hPct = pricePct24h;
+          existing.quoteVolume24h = quoteVol;
+          existing.high24h = high;
+          existing.low24h = low;
+          existing.historicalMetrics['1J'] = PeriodMetric(
+            priceChangePct: pricePct24h,
+            volumeChangePct: existing.historicalMetrics['1J']?.volumeChangePct ?? 0,
+          );
         }
       }
 
-      simulator.onPriceTick(symbol, lastPrice);
+      final list = _tokensMap.values.toList()
+        ..sort((a, b) => b.priceChange24hPct.compareTo(a.priceChange24hPct));
 
-      if (quoteVol < activePreset.minVolume24hUsdt &&
-          !(_tokensMap[symbol]?.isSpecial ?? false)) {
-        continue;
-      }
+      for (int i = 0; i < list.length; i++) {
+        final token = list[i];
+        final newRank = i + 1;
 
-      final existing = _tokensMap[symbol];
-      if (existing == null) {
-        _tokensMap[symbol] = TokenData(
-          symbol: symbol,
-          baseAsset: symbol.replaceAll('USDT', ''),
-          currentPrice: lastPrice,
-          priceChange24hPct: pricePct24h,
-          quoteVolume24h: quoteVol,
-          high24h: high,
-          low24h: low,
+        if (token.currentRank > 0 && newRank < token.currentRank) {
+          final int jumped = token.currentRank - newRank;
+          for (int k = 0; k < jumped; k++) {
+            token.upwardMoveTimestamps.add(now);
+          }
+        }
+
+        token.previousRank = token.currentRank == 0 ? newRank : token.currentRank;
+        token.currentRank = newRank;
+
+        token.upwardMoveTimestamps.removeWhere(
+          (ts) => now.difference(ts).inSeconds > activePreset.windowSeconds,
         );
-      } else {
-        existing.currentPrice = lastPrice;
-        existing.priceChange24hPct = pricePct24h;
-        existing.quoteVolume24h = quoteVol;
-        existing.high24h = high;
-        existing.low24h = low;
-        existing.historicalMetrics['1J'] = PeriodMetric(
-          priceChangePct: pricePct24h,
-          volumeChangePct: existing.historicalMetrics['1J']?.volumeChangePct ?? 0,
-        );
-      }
-    }
+        token.rankDeltaAccumulator = token.upwardMoveTimestamps.length;
 
-    DebugLogger.instance.log('POLL-DEBUG', '$count paires USDT valides traitées avec succès.');
+        final bool isEligible = !activePreset.specialTokensOnly || token.isSpecial;
+        final bool cooldownOk = token.lastAlertTime == null ||
+            now.difference(token.lastAlertTime!).inSeconds > 120;
 
-    final list = _tokensMap.values.toList()
-      ..sort((a, b) => b.priceChange24hPct.compareTo(a.priceChange24hPct));
+        if (isEligible &&
+            cooldownOk &&
+            token.rankDeltaAccumulator >= activePreset.requiredRankJumps &&
+            token.priceChange24hPct >= activePreset.minPriceChange1d) {
+          token.lastAlertTime = now;
+          final btcBiasText = isBtcBullish ? 'HAUSSIER (LONG)' : 'BAISSIER (SHORT)';
+          final reason =
+              '${token.symbol} a gagné +${token.rankDeltaAccumulator} rangs en ${activePreset.windowSeconds}s (Rang #${token.currentRank})';
 
-    for (int i = 0; i < list.length; i++) {
-      final token = list[i];
-      final newRank = i + 1;
+          DebugLogger.instance.log('ALERT-EXPLOSION', '🚀 $reason | BTC: $btcBiasText');
 
-      if (token.currentRank > 0 && newRank < token.currentRank) {
-        final int jumped = token.currentRank - newRank;
-        for (int k = 0; k < jumped; k++) {
-          token.upwardMoveTimestamps.add(now);
+          NotificationService.instance.showExplosionAlert(
+            symbol: token.symbol,
+            jumps: token.rankDeltaAccumulator,
+            windowSec: activePreset.windowSeconds,
+            price: token.currentPrice,
+            change24h: token.priceChange24hPct,
+            btcBias: btcBiasText,
+          );
+
+          simulator.onTokenSignal(
+            token: token,
+            isBtcBullish: isBtcBullish,
+            reason: reason,
+          );
+        }
+
+        if (i < 35 && !token.historyLoaded && !_historyFetching.contains(token.symbol)) {
+          _fetchHistoricalKlines(token);
         }
       }
 
-      token.previousRank = token.currentRank == 0 ? newRank : token.currentRank;
-      token.currentRank = newRank;
-
-      token.upwardMoveTimestamps.removeWhere(
-        (ts) => now.difference(ts).inSeconds > activePreset.windowSeconds,
-      );
-      token.rankDeltaAccumulator = token.upwardMoveTimestamps.length;
-
-      final bool isEligible = !activePreset.specialTokensOnly || token.isSpecial;
-      final bool cooldownOk = token.lastAlertTime == null ||
-          now.difference(token.lastAlertTime!).inSeconds > 120;
-
-      if (isEligible &&
-          cooldownOk &&
-          token.rankDeltaAccumulator >= activePreset.requiredRankJumps &&
-          token.priceChange24hPct >= activePreset.minPriceChange1d) {
-        token.lastAlertTime = now;
-        final btcBiasText = isBtcBullish ? 'HAUSSIER (LONG)' : 'BAISSIER (SHORT)';
-        final reason =
-            '${token.symbol} a gagné +${token.rankDeltaAccumulator} rangs en ${activePreset.windowSeconds}s (Rang #${token.currentRank})';
-
-        DebugLogger.instance.log('ALERT-EXPLOSION', '🚀 $reason | BTC: $btcBiasText');
-
-        NotificationService.instance.showExplosionAlert(
-          symbol: token.symbol,
-          jumps: token.rankDeltaAccumulator,
-          windowSec: activePreset.windowSeconds,
-          price: token.currentPrice,
-          change24h: token.priceChange24hPct,
-          btcBias: btcBiasText,
-        );
-
-        simulator.onTokenSignal(
-          token: token,
-          isBtcBullish: isBtcBullish,
-          reason: reason,
-        );
-      }
-
-      if (i < 35 && !token.historyLoaded && !_historyFetching.contains(token.symbol)) {
-        _fetchHistoricalKlines(token);
-      }
+      _rankedList = list;
+      _dirty = true;
+    } catch (e, st) {
+      DebugLogger.instance.log('WS-ERROR', 'Erreur de décodage WS: $e');
     }
-
-    _rankedList = list;
-    notifyListeners();
   }
 
   Future<void> _fetchHistoricalKlines(TokenData token) async {
@@ -267,7 +303,7 @@ class BinanceService extends ChangeNotifier {
             '180J': calcPeriod(180),
           };
           token.historyLoaded = true;
-          notifyListeners();
+          _dirty = true;
         }
       }
     } catch (e) {
